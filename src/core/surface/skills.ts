@@ -153,10 +153,10 @@ function findSkillDirs(root: string): string[] {
     const skillFile = join(fullPath, SKILL_FILE_NAME);
     if (existsSync(skillFile)) {
       results.push(fullPath);
-    } else {
-      // Recurse — this directory is a category namespace, not a skill.
-      results.push(...findSkillDirs(fullPath));
     }
+    // Always recurse — a directory may be both a skill (umbrella)
+    // and a category namespace containing sub-skills.
+    results.push(...findSkillDirs(fullPath));
   }
   return results;
 }
