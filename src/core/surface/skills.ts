@@ -11,7 +11,7 @@
  */
 
 import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
-import { isAbsolute, join, resolve, sep } from "node:path";
+import { basename, isAbsolute, join, resolve, sep } from "node:path";
 
 import type { FrontmatterValue } from "../types.ts";
 import { parseFrontmatter } from "../vault.ts";
@@ -50,23 +50,25 @@ export interface SkillRootsOptions {
   /** Vault root; vault-local skills live at `Brain/skills/`. */
   readonly vault?: string | null;
   /**
-   * Explicit skills directory override. When set, takes precedence over
-   * the vault-local `Brain/skills/` path, letting operators point the
-   * skill surface at an external directory (e.g. `~/.hermes/skills/`)
-   * without symlinks. Supports ~ expansion via the caller.
+   * Explicit skills directory override. When set, the skill surface
+   * reads from this path IN ADDITION TO the vault-local `Brain/skills/`
+   * path, letting operators extend the skill pool from an external
+   * directory (e.g. `~/.hermes/skills/`) without replacing the vault's
+   * own skills. Supports ~ expansion via the caller.
    */
   readonly skillsDir?: string | null;
 }
 
 export const SKILL_FILE_NAME = "SKILL.md";
 
-/** Existing skill roots in precedence order (repo first, vault last). */
+/** Existing skill roots. */
 export function skillRoots(opts: SkillRootsOptions): string[] {
   const candidates: string[] = [];
   if (opts.repoRoot) candidates.push(join(opts.repoRoot, "skills"));
   if (opts.skillsDir) {
     candidates.push(opts.skillsDir);
-  } else if (opts.vault) {
+  }
+  if (opts.vault) {
     candidates.push(join(opts.vault, "Brain", "skills"));
   }
   return candidates.filter((root) => {
@@ -96,20 +98,21 @@ function flattenTriggers(raw: FrontmatterValue): string {
   return "";
 }
 
-function readSkillEntry(root: string, dir: string): SkillEntry | null {
-  const path = join(root, dir);
-  const skillFile = join(path, SKILL_FILE_NAME);
+/** Read a skill entry from a path that is known to contain a SKILL.md. */
+function readSkillEntryFromPath(skillDir: string): SkillEntry | null {
+  const skillFile = join(skillDir, SKILL_FILE_NAME);
   if (!existsSync(skillFile)) return null;
   const [meta, body] = parseFrontmatter(skillFile);
   const metaName = typeof meta["name"] === "string" ? meta["name"].trim() : "";
   const metaDescription = typeof meta["description"] === "string" ? meta["description"].trim() : "";
   const rawTriggers = meta["triggers"];
   const triggers = rawTriggers !== undefined ? flattenTriggers(rawTriggers) : "";
+  const dir = basename(skillDir);
   return Object.freeze({
     name: metaName.length > 0 ? metaName : dir,
     description: metaDescription.length > 0 ? metaDescription : firstBodyLine(body),
     triggers,
-    path,
+    path: skillDir,
     skillFile,
   });
 }
@@ -125,28 +128,53 @@ function firstBodyLine(body: string): string {
 }
 
 /**
+ * Recursively find all directories under `root` that contain a SKILL.md
+ * file. A directory that itself has a SKILL.md is treated as a skill
+ * root; its subdirectories are NOT searched (skills are leaf nodes).
+ * Fail-soft: unreadable directories are skipped.
+ */
+function findSkillDirs(root: string): string[] {
+  const results: string[] = [];
+  let entries: string[];
+  try {
+    entries = readdirSync(root);
+  } catch {
+    return results;
+  }
+  for (const entry of entries) {
+    const fullPath = join(root, entry);
+    let st;
+    try {
+      st = statSync(fullPath);
+    } catch {
+      continue;
+    }
+    if (!st.isDirectory()) continue;
+    const skillFile = join(fullPath, SKILL_FILE_NAME);
+    if (existsSync(skillFile)) {
+      results.push(fullPath);
+    } else {
+      // Recurse — this directory is a category namespace, not a skill.
+      results.push(...findSkillDirs(fullPath));
+    }
+  }
+  return results;
+}
+
+/**
  * Discover skills across roots. A later root overrides an earlier one
- * on name collision (vault-local skills shadow shipped ones). Output
- * is sorted by name. Fail-soft: unreadable roots/directories skip.
+ * on name collision (vault-local skills shadow shipped ones). Scans
+ * recursively — skills nested under category directories are found.
+ * Output is sorted by name. Fail-soft: unreadable roots/directories
+ * skip.
  */
 export function discoverSkills(roots: ReadonlyArray<string>): SkillEntry[] {
   const byName = new Map<string, SkillEntry>();
   for (const root of roots) {
-    let dirs: string[];
-    try {
-      dirs = readdirSync(root).filter((d) => {
-        try {
-          return statSync(join(root, d)).isDirectory();
-        } catch {
-          return false;
-        }
-      });
-    } catch {
-      continue;
-    }
-    for (const dir of dirs) {
+    const skillDirs = findSkillDirs(root);
+    for (const skillDir of skillDirs) {
       try {
-        const entry = readSkillEntry(root, dir);
+        const entry = readSkillEntryFromPath(skillDir);
         if (entry !== null) byName.set(entry.name, entry);
       } catch {
         // One malformed skill never hides the rest.
