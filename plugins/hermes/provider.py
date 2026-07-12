@@ -205,10 +205,20 @@ class OpenSecondBrainMemoryProvider(MemoryProvider):
                 "query": query[:200],
             })
             if pack and isinstance(pack, dict):
-                # Strip skipped array — it leaks preference IDs/tokens to the
-                # model even when filter-missed. Only inject items that matched.
-                clean = {k: v for k, v in pack.items() if k != "skipped"}
-                recalled = self._text(clean)
+                # Strip skipped array from the innermost text JSON so the
+                # model never sees preference IDs/tokens that were filtered out.
+                content = pack.get("content")
+                if isinstance(content, list) and content and isinstance(content[0], dict):
+                    text = content[0].get("text", "")
+                    if text:
+                        try:
+                            data = json.loads(text)
+                            if isinstance(data, dict):
+                                data.pop("skipped", None)
+                                content[0]["text"] = json.dumps(data, ensure_ascii=False)
+                        except Exception:
+                            pass
+                recalled = self._text(pack)
                 if recalled:
                     parts.append(recalled)
         # Skill auto-attach (Agent Surface Suite): the TS side gates on the
