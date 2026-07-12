@@ -84,7 +84,14 @@ export const MOST_APPLIED_WINDOW_DAYS_DEFAULT = 30;
 export const INJECT_BUDGET_CHARS_DEFAULT = 8000;
 export const INJECT_BUDGET_CHARS_MIN = 500;
 export const INJECT_BUDGET_CHARS_MAX = 200_000;
-/** Default top-N limit when `_brain.yaml` lacks `active.most_applied.limit`. */
+/** Default recently-retired count when `_brain.yaml` lacks `active.retired_recent_count`. */
+export const RECENTLY_RETIRED_COUNT_DEFAULT = 3;
+
+/** Minimum */
+const RECENTLY_RETIRED_COUNT_MIN = 0;
+
+/** Maximum */
+const RECENTLY_RETIRED_COUNT_MAX = 20;
 export const MOST_APPLIED_LIMIT_DEFAULT = 10;
 
 /**
@@ -894,12 +901,31 @@ export function validateBrainConfigDetailed(
       }
       injectBudgetChars = raw;
     }
+    let retiredRecentCount: number | undefined;
+    if ("retired_recent_count" in activeMap) {
+      const raw = activeMap["retired_recent_count"];
+      if (
+        typeof raw !== "number" ||
+        !Number.isInteger(raw) ||
+        raw < RECENTLY_RETIRED_COUNT_MIN ||
+        raw > RECENTLY_RETIRED_COUNT_MAX
+      ) {
+        throw new BrainConfigError(
+          `must be an integer between ${RECENTLY_RETIRED_COUNT_MIN} and ` +
+            `${RECENTLY_RETIRED_COUNT_MAX}; got ${describe(raw)}`,
+          "active.retired_recent_count",
+          source,
+        );
+      }
+      retiredRecentCount = raw;
+    }
     // Forward-compat: unknown sub-keys under `active:` → warning.
     for (const k of Object.keys(activeMap)) {
       if (
         k !== "most_applied_window_days" &&
         k !== "most_applied_limit" &&
-        k !== "inject_budget_chars"
+        k !== "inject_budget_chars" &&
+        k !== "retired_recent_count"
       ) {
         warnings.push({
           path: source ?? "<config>",
@@ -910,6 +936,7 @@ export function validateBrainConfigDetailed(
     active = {
       ...(mostApplied !== undefined ? { most_applied: mostApplied } : {}),
       ...(injectBudgetChars !== undefined ? { inject_budget_chars: injectBudgetChars } : {}),
+      ...(retiredRecentCount !== undefined ? { retired_recent_count: retiredRecentCount } : {}),
     };
   }
 
@@ -1722,12 +1749,23 @@ export function validateBrainConfigDetailed(
     }
     // Forward-compat: unknown sub-keys under `feedback:` → warning.
     for (const key of Object.keys(rawMap)) {
-      if (key !== "default_scope") {
+      if (key !== "default_scope" && key !== "disable_force_confirmed") {
         warnings.push({
           path: source ?? "<config>",
           message: `feedback.${key}: unknown field ignored (forward-compat)`,
         });
       }
+    }
+    if ("disable_force_confirmed" in rawMap) {
+      const value = rawMap["disable_force_confirmed"];
+      if (typeof value !== "boolean") {
+        throw new BrainConfigError(
+          `must be a boolean; got ${describe(value)}`,
+          "feedback.disable_force_confirmed",
+          source,
+        );
+      }
+      partial.disable_force_confirmed = value;
     }
     feedback = Object.freeze(partial);
   }

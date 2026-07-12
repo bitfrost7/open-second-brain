@@ -894,7 +894,6 @@ export interface BrainMostAppliedConfig {
   readonly limit: number;
 }
 
-/** Container for the `active:` block of `_brain.yaml`. */
 export interface BrainActiveConfig {
   readonly most_applied?: BrainMostAppliedConfig;
   /**
@@ -903,6 +902,11 @@ export interface BrainActiveConfig {
    * policy.ts applies.
    */
   readonly inject_budget_chars?: number;
+  /**
+   * Max recently-retired entries shown in active.md. Default 3. Set to
+   * 0 to hide the recently-retired section entirely.
+   */
+  readonly retired_recent_count?: number;
 }
 
 /**
@@ -1005,6 +1009,13 @@ export interface BrainFeedbackConfig {
    * byte-identical to prior behaviour.
    */
   readonly default_scope?: string;
+  /**
+   * When true, `force_confirmed: true` in `brain_feedback` is rejected
+   * with an error. The signal is still written to inbox/, but no
+   * preference is created directly — it must go through the normal
+   * dream pass promotion cycle. Defaults to false.
+   */
+  readonly disable_force_confirmed?: boolean;
 }
 
 /**

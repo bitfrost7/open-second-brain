@@ -24,6 +24,7 @@ import {
 import { BRAIN_ROLES } from "../../core/brain/trust/role.ts";
 import { resolveEffectiveScope, writeSignal } from "../../core/brain/signal.ts";
 import { loadFeedbackDefaultScopeSafe } from "../../core/brain/policy.ts";
+import { loadBrainConfig } from "../../core/brain/policy.ts";
 import { writePreference } from "../../core/brain/preference.ts";
 import { validateBrainFeedbackInput } from "../../core/brain/sessions/validate-feedback.ts";
 import { isoDate, isoSecond } from "../../core/brain/time.ts";
@@ -77,6 +78,20 @@ async function toolBrainFeedback(
     force_confirmed,
   } = validated.value;
   const forceConfirmed = force_confirmed ?? false;
+
+  // Vault-configured force_confirmed gate: when `feedback.disable_force_confirmed`
+  // is true, reject `force_confirmed: true` with a clear error. The signal
+  // is still written to inbox/ -- only the bypass is blocked.
+  if (forceConfirmed) {
+    const brainConfig = loadBrainConfig(ctx.vault);
+    if (brainConfig.feedback?.disable_force_confirmed) {
+      throw new MCPError(
+        INVALID_PARAMS,
+        "force_confirmed is disabled by vault config (feedback.disable_force_confirmed: true). " +
+          "The signal has been written to inbox/; the preference must go through the normal dream pass cycle.",
+      );
+    }
+  }
 
   // Agent-fallback stays MCP-side: validator just hands back the user-
   // supplied value (or undefined); the live path resolves via config
@@ -446,7 +461,7 @@ export const FEEDBACK_TOOLS: ReadonlyArray<ToolDefinition> = Object.freeze([
   {
     name: "brain_feedback",
     description:
-      "Record one Brain taste signal in `Brain/inbox/sig-*.md`. With `force_confirmed: true`, create the preference directly (skips the dream trial window).",
+      "Record one Brain taste signal in `Brain/inbox/sig-*.md`. With `force_confirmed: true`, create the preference directly (skips the dream trial window). Note: `force_confirmed` may be disabled by vault config (`feedback.disable_force_confirmed: true`).",
     inputSchema: {
       type: "object",
       properties: {

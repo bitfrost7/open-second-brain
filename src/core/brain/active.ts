@@ -40,6 +40,7 @@ import { computeMostApplied, type MostAppliedEntry } from "./most-applied.ts";
 import {
   MOST_APPLIED_LIMIT_DEFAULT,
   MOST_APPLIED_WINDOW_DAYS_DEFAULT,
+  RECENTLY_RETIRED_COUNT_DEFAULT,
   loadBrainConfig,
   loadGuardrailsConfigSafe,
 } from "./policy.ts";
@@ -48,8 +49,6 @@ import { brainActivePath, brainDirs } from "./paths.ts";
 import { isoSecond } from "./time.ts";
 import { sortByProvenanceTrust } from "./provenance/trust-order.ts";
 import { BRAIN_PREFERENCE_STATUS, type BrainPreference, type BrainRetired } from "./types.ts";
-
-const RECENTLY_RETIRED_COUNT = 3;
 
 const FRONTMATTER_KIND = "brain-active";
 
@@ -99,7 +98,19 @@ export function regenerateActive(
   const path = brainActivePath(vault);
 
   const preferences = readActivePreferences(vault);
-  const retiredRecent = readRecentlyRetired(vault, RECENTLY_RETIRED_COUNT);
+
+  // Read retired_recent_count from `_brain.yaml:active.retired_recent_count`.
+  // Defaults to 3; set to 0 to hide the recently-retired section entirely.
+  let retiredCount = RECENTLY_RETIRED_COUNT_DEFAULT;
+  try {
+    const cfg = loadBrainConfig(vault);
+    if (cfg.active?.retired_recent_count !== undefined) {
+      retiredCount = cfg.active.retired_recent_count;
+    }
+  } catch {
+    // intentional fallback
+  }
+  const retiredRecent = readRecentlyRetired(vault, retiredCount);
 
   // Confirmed prefs sort by confidence then id. When provenance trust
   // ordering is on, re-rank stated > deduced > inferred as the primary key
