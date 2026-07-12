@@ -204,9 +204,13 @@ class OpenSecondBrainMemoryProvider(MemoryProvider):
                 "max_tokens": _PREFETCH_MAX_TOKENS,
                 "query": query[:200],
             })
-            recalled = self._text(pack)
-            if recalled:
-                parts.append(recalled)
+            if pack and isinstance(pack, dict):
+                # Strip skipped array — it leaks preference IDs/tokens to the
+                # model even when filter-missed. Only inject items that matched.
+                clean = {k: v for k, v in pack.items() if k != "skipped"}
+                recalled = self._text(clean)
+                if recalled:
+                    parts.append(recalled)
         # Skill auto-attach (Agent Surface Suite): the TS side gates on the
         # skill_auto_attach config key and returns an empty block when off,
         # so the default injection stays byte-identical. Fail-soft like every
