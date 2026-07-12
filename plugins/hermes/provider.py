@@ -246,6 +246,17 @@ class OpenSecondBrainMemoryProvider(MemoryProvider):
         self._sync_threads.append(thread)
         thread.start()
 
+        # Lightweight analyze thread: evaluate brain_search results from
+        # this turn's messages against inbox signals, then auto-vote.
+        if self._bridge is not None and messages:
+            _analyze_thread = threading.Thread(
+                target=self._analyze_turn,
+                args=(messages, session_id),
+                daemon=True,
+                name="osb-analyze-turn",
+            )
+            _analyze_thread.start()
+
     def on_pre_compress(self, messages: list, **_kwargs: Any) -> None:
         """Flush buffered turns into deterministic continuity storage before compaction."""
         self._drain_captures()
@@ -303,6 +314,183 @@ class OpenSecondBrainMemoryProvider(MemoryProvider):
                 self._bridge.stop()
             except Exception:  # noqa: BLE001 - shutdown is best-effort
                 pass
+
+    # -- analyze ----------------------------------------------------------------
+
+    def _analyze_turn(self, messages: list, session_id: str) -> None:
+        """Evaluate the completed turn: extract brain_search results (inbox
+        signals) and injected preferences from the conversation messages,
+        then auto-vote and auto-apply evidence using a lightweight model.
+        Runs in a daemon thread — never blocks the main conversation loop."""
+        # pylint: disable=import-outside-toplevel
+        try:
+            from agent.auxiliary_client import call_llm as _call_llm
+        except Exception:
+            return  # auxiliary client unavailable — skip
+
+        try:
+            import json as _json
+            import re as _re
+
+            # 1. Extract brain_search results (inbox signals) from tool results
+            inbox_signals: list[dict] = []
+            for msg in messages:
+                if msg.get("role") != "tool":
+                    continue
+                try:
+                    content = msg.get("content", "")
+                    txt = ""
+                    if isinstance(content, list):
+                        for chunk in content:
+                            t = chunk.get("text", "") if isinstance(chunk, dict) else str(chunk)
+                            txt += t
+                    elif isinstance(content, str):
+                        txt = content
+                    if "inbox" in txt.lower() or "sig-" in txt or "topic" in txt.lower():
+                        inbox_signals.append({"source": "inbox", "raw": txt[:1200]})
+                except Exception:
+                    continue
+
+            # 2. Extract injected preferences from system prompt (messages[0])
+            #    via regex on the context_pack JSON block
+            prefs: list[dict] = []
+            sys_msg = messages[0].get("content", "") if messages else ""
+            if isinstance(sys_msg, str):
+                # Match the context-pack items JSON block
+                items_match = _re.search(r'"items"\s*:\s*\[.*?\]', sys_msg, _re.DOTALL)
+                if items_match:
+                    try:
+                        items_json = "{" + items_match.group(0) + "}"
+                        items_data = _json.loads(items_json).get("items", [])
+                        for item in items_data:
+                            pid = item.get("id", "")
+                            body = item.get("body", "") or item.get("principle", "")
+                            if pid:
+                                prefs.append({"id": pid, "principle": body[:200]})
+                    except Exception:
+                        pass
+
+            if not inbox_signals and not prefs:
+                return
+
+            # 3. Find the last user query for context
+            user_query = ""
+            for msg in reversed(messages):
+                if msg.get("role") == "user" and isinstance(msg.get("content"), str):
+                    user_query = msg["content"][:600]
+                    break
+
+            # 4. Build prompt
+            prompt_parts = [
+                "You are a conversation analyzer. Read the inbox signals, active preferences, "
+                "and conversation below, then output JSON.\n"
+            ]
+            if inbox_signals:
+                prompt_parts.append("## Inbox Signals (from brain_search)\n")
+                for s in inbox_signals:
+                    prompt_parts.append(s["raw"])
+                    prompt_parts.append("")
+            if prefs:
+                prompt_parts.append("## Active Preferences (injected into context)\n")
+                for p in prefs:
+                    prompt_parts.append(f"- {p['id']}: {p['principle']}")
+                prompt_parts.append("")
+            prompt_parts.append(f"## Conversation User Query\n{user_query}\n")
+            prompt_parts.append(
+                '## Output JSON\n'
+                '{\n'
+                '  "signal_votes": [\n'
+                '    {"topic": "...", "signal": "positive|negative", '
+                '"principle": "rule text here"}\n'
+                '  ],\n'
+                '  "evidence": [\n'
+                '    {"pref_id": "...", "result": "applied|violated|outdated"}\n'
+                '  ],\n'
+                '  "new_signals": [\n'
+                '    {"topic": "...", "signal": "positive|negative", '
+                '"principle": "rule text here"}\n'
+                '  ]\n'
+                '}\n\n'
+                "For signal_votes: vote 'positive' if the conversation confirms "
+                "the signal, 'negative' if it contradicts. Only vote if the "
+                "signal's topic is clearly relevant.\n"
+                "For evidence: 'applied' if the artifact follows the preference, "
+                "'violated' if it breaks it. Omit if irrelevant.\n"
+                "For new_signals: if the conversation reveals a NEW preference pattern "
+                "that is NOT already covered by any inbox signal or active preference, "
+                "create a new signal here. Use a meaningful topic slug. "
+                "Do NOT create signals for topics already present in Inbox Signals or Active Preferences.\n"
+            )
+            prompt = "\n".join(prompt_parts)
+
+            # 5. Call lightweight model
+            response = _call_llm(
+                task="analyze",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.1,
+                max_tokens=500,
+            )
+            raw = getattr(response, "content", None) or ""
+            if not raw:
+                try:
+                    raw = response.choices[0].message.content
+                except Exception:
+                    return
+
+            # 6. Parse JSON
+            import re as _re
+            json_match = _re.search(r"\{.*\}", raw, _re.DOTALL)
+            if not json_match:
+                return
+            result = _json.loads(json_match.group(0))
+
+            # 7. Vote on inbox signals (回路2)
+            for sv in result.get("signal_votes", []):
+                topic = sv.get("topic", "").strip()
+                signal = sv.get("signal", "").strip()
+                principle = sv.get("principle", "").strip()
+                if topic and signal in ("positive", "negative") and principle:
+                    self._safe_call("brain_feedback", {
+                        "topic": topic,
+                        "signal": signal,
+                        "principle": principle,
+                    })
+
+            # 8. Apply evidence for preferences (回路1)
+            for ev in result.get("evidence", []):
+                pref_id = ev.get("pref_id", "").strip()
+                ev_result = ev.get("result", "").strip()
+                if pref_id and ev_result in ("applied", "violated", "outdated"):
+                    self._safe_call("brain_apply_evidence", {
+                        "pref_id": pref_id,
+                        "artifact": f"[[hermes:session/{session_id}]]",
+                        "result": ev_result,
+                    })
+
+            # 9. Create new signals for new patterns (回路3)
+            for ns in result.get("new_signals", []):
+                topic = ns.get("topic", "").strip()
+                signal = ns.get("signal", "").strip()
+                principle = ns.get("principle", "").strip()
+                if topic and signal in ("positive", "negative") and principle:
+                    # Dedup: skip if topic already exists in current inbox/prefs
+                    topic_lower = topic.lower()
+                    existing_topics = {
+                        s.get("topic", "").lower()
+                        for s in inbox_signals
+                    } | {
+                        p.get("id", "").lower()
+                        for p in prefs
+                    }
+                    if topic_lower not in existing_topics:
+                        self._safe_call("brain_feedback", {
+                            "topic": topic,
+                            "signal": signal,
+                            "principle": principle,
+                        })
+
+        except Exception:  # noqa: BLE001 - never break the conversation
+            pass
 
     # -- internals -----------------------------------------------------------
 

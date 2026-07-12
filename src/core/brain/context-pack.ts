@@ -301,10 +301,18 @@ export function packContext(vault: string, opts: ContextPackOptions): ContextPac
   const items: ContextPackItem[] = [];
   const skipped: ContextPackSkipped[] = [];
   let used = 0;
+
+  // Token-overlap matching: tokenize query once, then score each
+  // candidate by how many query tokens appear in its topic+principle+body.
+  // Improves over the legacy includes() which missed partial matches.
+  const queryTokens: string[] | null =
+    query !== null ? query.split(/\s+/).filter((t) => t.length > 0) : null;
+
   for (const { item: c, text: body, trimmed } of budgeted.kept) {
-    if (query !== null) {
-      const haystack = normalizeForDedup(`${c.topic} ${c.principle}`);
-      if (!haystack.includes(query)) {
+    if (queryTokens !== null && queryTokens.length > 0) {
+      const haystack = normalizeForDedup(`${c.topic} ${c.principle} ${body}`);
+      const matched = queryTokens.filter((qt) => haystack.includes(qt));
+      if (matched.length === 0) {
         skipped.push({ id: c.id, tokens: c.tokens, reason: "filter-miss" });
         continue;
       }
